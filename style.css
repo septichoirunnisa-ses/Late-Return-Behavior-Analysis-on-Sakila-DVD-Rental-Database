@@ -1,0 +1,99 @@
+h1.title   { text-align: center; ... }  
+h4.author  { text-align: center; ... }  
+
+body {
+  font-family: "Segoe UI", sans-serif;
+  line-height: 1.7;
+}
+
+/* Heading */
+h1 {
+  color: #1e3a5f;
+  font-weight: 700;
+  border-bottom: 3px solid #1e3a5f;
+  padding-bottom: 8px;
+  margin-top: 40px;
+}
+
+h2 {
+  color: #2c3e50;
+  font-weight: 600;
+  margin-top: 30px;
+}
+
+/* Box */
+.info-box {
+  background: #eef5ff;
+  border-left: 5px solid #1e3a5f;
+  padding: 15px;
+  border-radius: 8px;
+  margin: 20px 0;
+}
+
+.insight {
+  background: #f8f9fa;
+  border-left: 5px solid #0d6efd;
+  padding: 15px;
+  border-radius: 8px;
+  margin: 20px 0;
+}
+
+.formula-box {
+  background: #f4f6f9;
+  padding: 15px;
+  border-radius: 10px;
+  text-align: center;
+  margin: 20px 0;
+}
+
+/* Metric cards */
+.metric-row {
+  display: flex;
+  gap: 15px;
+  margin: 25px 0;
+  flex-wrap: wrap;
+}
+
+.metric-card {
+  flex: 1;
+  min-width: 180px;
+  background: white;
+  border-radius: 12px;
+  padding: 20px;
+  text-align: center;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+}
+
+.metric-card .val {
+  font-size: 28px;
+  font-weight: bold;
+  color: #1e3a5f;
+}
+
+.metric-card .lbl {
+  color: #6c757d;
+  font-size: 14px;
+}
+
+/* Sidebar TOC */
+.tocify {
+  border-radius: 12px;
+  border: none;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+}
+
+.tocify ul, .tocify li {
+  line-height: 1.8;
+}
+
+/* Content */
+.main-container {
+  max-width: 1200px;
+}
+
+/* Table */
+.table {
+  border-radius: 10px;
+  overflow: hidden;
+}
+

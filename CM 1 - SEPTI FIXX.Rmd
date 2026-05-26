@@ -1,0 +1,705 @@
+---
+title: "Late Return Behavior Analysis on Sakila DVD Rental Database"
+author: "Septi Choirunnisa (M0724078)"
+
+output:
+  html_document:
+    theme: flatly
+    css: style.css
+    toc: true
+    toc_float: true
+    number_sections: true
+    smooth_scroll: true
+    code_folding: show
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  warning    = FALSE,
+  message    = FALSE,
+  fig.align  = "center",
+  fig.width  = 9,
+  fig.height = 5
+)
+```
+
+---
+
+# Introduction
+
+<div class="info-box">
+<strong>Latar Belakang</strong><br>
+Keterlambatan pengembalian film <em>(late return)</em> merupakan salah satu masalah operasional utama dalam bisnis rental video. Ketika pelanggan terlambat mengembalikan film, inventori menjadi tidak tersedia bagi pelanggan lain yang ingin menyewa sehingga secara langsung berpotensi menurunkan pendapatan perusahaan dan kepuasan pelanggan. Selain itu, keterlambatan pengembalian juga dapat mengganggu efisiensi pengelolaan inventori serta kualitas layanan yang diberikan kepada pelanggan. Oleh karena itu, analisis terhadap perilaku keterlambatan pengembalian film menjadi penting untuk dilakukan.
+</div>
+
+<div class="info-box">
+<strong>Data Description</strong><br>
+data description:
+Analisis ini menggunakan database Sakila, yaitu database simulasi sistem rental DVD yang disediakan oleh MySQL untuk keperluan pembelajaran database dan analisis data. Database ini menggambarkan proses bisnis rental film, mulai dari data pelanggan, transaksi penyewaan, inventori film, kategori film, hingga pembayaran rental.
+
+Data yang digunakan dalam analisis diperoleh dari beberapa tabel yang saling terhubung, yaitu tabel rental, inventory, film, film_category, category, customer, dan payment. Melalui proses join antar tabel, diperoleh dataset yang memuat informasi mengenai pelanggan, kategori film, durasi rental, durasi aktual pengembalian, status keterlambatan pengembalian (late return), serta jumlah pembayaran rental.
+
+Variabel utama yang dianalisis dalam penelitian ini adalah status keterlambatan pengembalian film (late_return). Variabel tersebut dibentuk berdasarkan perbandingan antara durasi aktual pengembalian film dengan batas durasi rental yang telah ditentukan. Jika durasi aktual pengembalian melebihi batas rental, maka transaksi dikategorikan sebagai keterlambatan pengembalian.
+</div>
+
+Tujuan dari analisis ini adalah:
+
+1. Menganalisis distribusi keterlambatan pengembalian film.
+2. Mengidentifikasi kategori film dengan tingkat keterlambatan tertinggi.
+3. Menganalisis perilaku pelanggan terhadap keterlambatan pengembalian film.
+4. Membangun model <em>logistic regression</em> untuk memprediksi kemungkinan keterlambatan pengembalian film.
+5. Memberikan <em>insight</em> bisnis terkait dampak keterlambatan terhadap ketersediaan inventori dan potensi revenue perusahaan.
+
+**Definisi Variabel Target:**
+Film dinyatakan terlambat dikembalikan apabila durasi sewa aktual melebihi durasi sewa yang diizinkan:
+
+<div class="formula-box">
+$$
+\mathrm{days\_diff}
+=
+\mathrm{actual\_return\_days}
+-
+\mathrm{rental\_duration}
+$$
+$$
+Y =
+\begin{cases}
+1, & \text{jika } \mathrm{days\_diff} > 0 \\
+0, & \text{jika } \mathrm{days\_diff} \leq 0
+\end{cases}
+$$
+</div>
+
+---
+
+# Database Connection
+
+Koneksi ke database **Sakila** dilakukan menggunakan driver MySQL ODBC melalui package `DBI` dan `odbc`.
+
+```{r koneksi}
+library(DBI)
+library(odbc)
+
+con <- dbConnect(
+  odbc(),
+  Driver   = "MySQL ODBC 8.0 ANSI Driver",
+  Server   = "127.0.0.1",
+  Database = "sakila",
+  UID      = "root",
+  PWD      = "root",
+  Port     = 3306
+)
+
+```
+
+---
+
+# Data Collection
+
+Data diambil dari beberapa tabel yang saling berelasi: `rental`, `customer`, `inventory`, `film`, `film_category`, dan `category`. Proses pengambilan data dilakukan menggunakan query SQL dengan teknik join antar tabel untuk memperoleh informasi transaksi rental, karakteristik film, kategori genre, serta pembayaran pelanggan.
+
+```{r sql-query}
+query <- "
+SELECT
+  r.rental_id,
+  r.rental_date,
+  r.return_date,
+  r.customer_id,
+  CONCAT(c.first_name, ' ', c.last_name) AS customer_name,
+  f.film_id,
+  f.title           AS film_title,
+  f.rental_duration,
+  f.rental_rate,
+  f.length          AS film_length,
+  f.rating          AS film_rating,
+  cat.name          AS genre,
+  p.amount          AS payment_amount
+FROM rental r
+JOIN customer      c   ON r.customer_id  = c.customer_id
+JOIN inventory     inv ON r.inventory_id = inv.inventory_id
+JOIN film          f   ON inv.film_id    = f.film_id
+JOIN film_category fc  ON f.film_id      = fc.film_id
+JOIN category      cat ON fc.category_id = cat.category_id
+LEFT JOIN payment  p   ON r.rental_id    = p.rental_id
+WHERE r.return_date IS NOT NULL
+"
+```
+
+Selanjutnya query dieksekusi menggunakan fungsi dbGetQuery() untuk menghasilkan dataset analisis.
+
+```{r query}
+df_raw <- dbGetQuery(con, query)
+dbDisconnect(con)
+
+cat("Dimensi data:", nrow(df_raw), "baris x", ncol(df_raw), "kolom\n")
+```
+
+---
+
+# Data Understanding
+
+Tahap <em>data understanding</em> dilakukan untuk memahami struktur data hasil ekstraksi dari database Sakila serta melihat karakteristik umum data rental film. Pada tahap ini dilakukan proses konversi tipe data, pembentukan variabel turunan <em>(feature engineering)</em>, serta analisis statistik deskriptif untuk memperoleh gambaran awal mengenai pola keterlambatan pengembalian film.
+
+## Struktur Data
+
+Pada tahap ini dilakukan proses persiapan data yang meliputi konversi tipe data tanggal, pembentukan variabel turunan seperti durasi aktual rental dan status keterlambatan, ekstraksi informasi waktu transaksi, serta pembersihan data yang tidak valid dan duplikat. Setelah preprocessing selesai, struktur data diperiksa menggunakan fungsi glimpse() untuk memastikan tipe variabel telah sesuai untuk analisis.
+
+```{r struktur}
+library(dplyr)
+library(lubridate)
+
+# Konversi tipe dan feature engineering
+df <- df_raw %>%
+  mutate(
+    rental_date  = ymd_hms(rental_date),
+    return_date  = ymd_hms(return_date),
+    actual_days  = as.numeric(difftime(return_date, rental_date, units = "days")),
+    days_diff    = actual_days - rental_duration,
+    is_late      = ifelse(days_diff > 0, 1, 0),
+    status       = ifelse(days_diff > 0, "Terlambat", "Tepat Waktu"),
+    rental_month = month(rental_date, label = TRUE),
+    rental_dow   = wday(rental_date,  label = TRUE)
+  ) %>%
+  filter(actual_days > 0, actual_days <= 60) %>%
+  distinct(rental_id, .keep_all = TRUE)
+
+glimpse(df)
+```
+
+## Statistik Deskriptif
+
+Statistik deskriptif digunakan untuk memberikan gambaran umum mengenai karakteristik data rental, seperti jumlah transaksi, proporsi keterlambatan, rata-rata durasi rental, serta tingkat keterlambatan maksimum yang terjadi.
+
+```{r statistik}
+library(knitr)
+library(kableExtra)
+
+stats <- df %>%
+  summarise(
+    `Total Rental`          = n(),
+    `Jumlah Terlambat`      = sum(is_late),
+    `Jumlah Tepat Waktu`    = sum(is_late == 0),
+    `% Terlambat`           = round(mean(is_late) * 100, 2),
+    `Rata-rata Hari Sewa`   = round(mean(actual_days), 2),
+    `Rata-rata Selisih Hari`= round(mean(days_diff), 2),
+    `Maks. Keterlambatan`   = max(days_diff)
+  )
+
+stats %>%
+  t() %>%
+  as.data.frame() %>%
+  setNames("Nilai") %>%
+  kable(caption = "Tabel 1. Statistik Deskriptif Data Rental") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+<div class="metric-row">
+<div class="metric-card">
+<div class="val">`r format(stats[["Total Rental"]], big.mark=",")`</div>
+<div class="lbl">Total Rental</div>
+</div>
+<div class="metric-card">
+<div class="val">`r paste0(stats[["% Terlambat"]], "%")`</div>
+<div class="lbl">Terlambat</div>
+</div>
+<div class="metric-card">
+<div class="val">`r stats[["Rata-rata Hari Sewa"]]`</div>
+<div class="lbl">Rata-rata Hari Sewa</div>
+</div>
+<div class="metric-card">
+<div class="val">`r stats[["Maks. Keterlambatan"]]`</div>
+<div class="lbl">Maks. Keterlambatan (hr)</div>
+</div>
+</div>
+
+<div class="insight">
+<strong>Interpretasi:</strong> Dari total <strong>`r format(stats[["Total Rental"]], big.mark=",")`</strong> transaksi rental, sebesar <strong>`r stats[["% Terlambat"]]`%</strong> transaksi mengalami keterlambatan pengembalian film. Persentase ini menunjukkan bahwa **keterlambatan pengembalian cukup sering terjadi** dalam proses rental. Kondisi tersebut dapat menyebabkan film menjadi tidak tersedia untuk pelanggan lain dalam periode tertentu, sehingga berpotensi mengurangi peluang penyewaan dan memengaruhi kualitas layanan. Hal tersebut menunjukkan bahwa keterlambatan merupakan fenomena yang perlu mendapat perhatian serius dari sisi manajemen inventori.
+</div>
+
+---
+
+# Exploratory Data Analysis
+
+Pada tahap <em>Exploratory Data Analysis</em> (EDA), dilakukan eksplorasi terhadap pola keterlambatan pengembalian film berdasarkan beberapa aspek, yaitu distribusi status pengembalian, selisih hari keterlambatan, kategori genre film, serta perilaku pelanggan. Visualisasi digunakan untuk membantu memahami karakteristik data secara lebih intuitif.
+
+```{r library-viz, include=FALSE}
+library(ggplot2)
+library(scales)
+
+# Tema konsisten
+theme_report <- function() {
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title      = element_text(face = "bold", size = 13, color = "#1e3a5f"),
+      plot.subtitle   = element_text(size = 11, color = "#6c757d"),
+      axis.title      = element_text(size = 11, color = "#2c3e50"),
+      axis.text       = element_text(size = 10, color = "#495057"),
+      panel.grid.minor  = element_blank(),
+      panel.grid.major  = element_line(color = "#e9ecef"),
+      plot.background   = element_rect(fill = "white", color = NA),
+      panel.background  = element_rect(fill = "white", color = NA),
+      legend.position   = "bottom",
+      plot.margin       = ggplot2::margin(12, 12, 12, 12)
+    )
+}
+
+pal2 <- c("Tepat Waktu" = "#2e6da4", "Terlambat" = "#F1A9FF")
+```
+
+## Distribusi Status Pengembalian
+
+Analisis ini dilakukan untuk melihat proporsi transaksi yang dikembalikan tepat waktu dan terlambat. Distribusi tersebut memberikan gambaran awal mengenai seberapa besar tingkat keterlambatan yang terjadi pada sistem rental DVD.
+
+```{r viz-status, fig.cap="Gambar 1. Distribusi Status Pengembalian Film"}
+df %>%
+  count(status) %>%
+  mutate(pct = n / sum(n) * 100,
+         label = paste0(round(pct, 1), "%\n(n = ", format(n, big.mark = ","), ")")) %>%
+  ggplot(aes(x = status, y = n, fill = status)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = label), vjust = -0.3, fontface = "bold", size = 4) +
+  scale_fill_manual(values = pal2) +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.15))) +
+  labs(
+    title    = "Distribusi Status Pengembalian Film",
+    subtitle = "Perbandingan antara rental yang tepat waktu dan terlambat",
+    x        = NULL,
+    y        = "Jumlah Transaksi"
+  ) +
+  theme_report()
+```
+
+<div class="insight-box">
+<strong>Interpretasi:</strong> Grafik di atas menunjukkan bahwa jumlah transaksi yang terlambat dan tepat waktu memiliki perbedaan yang tidak terlalu besar. Meskipun persentase keterlambatan hanya sedikit lebih tinggi dibandingkan pengembalian tepat waktu, kondisi ini tetap perlu diperhatikan karena menunjukkan bahwa keterlambatan pengembalian cukup sering terjadi. Jika terjadi secara terus-menerus, keterlambatan tersebut dapat memengaruhi ketersediaan inventori film dan mengurangi kesempatan pelanggan lain untuk melakukan rental pada waktu yang diinginkan.
+</div>
+
+## Distribusi Selisih Hari Pengembalian
+
+Selain melihat status keterlambatan secara umum, juga dilakukan analisis terhadap selisih hari pengembalian untuk mengetahui seberapa jauh keterlambatan maupun percepatan pengembalian film terjadi.
+
+```{r viz-hist, fig.cap="Gambar 2. Distribusi Selisih Hari Pengembalian"}
+ggplot(df, aes(x = days_diff, fill = status)) +
+  geom_histogram(binwidth = 1, color = "white", linewidth = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "#1e3a5f", linewidth = 0.9) +
+  annotate("text", x = 0.6, y = Inf, label = "Batas waktu",
+           vjust = 1.8, hjust = 0, size = 3.5, color = "#1e3a5f", fontface = "bold") +
+  scale_fill_manual(values = pal2, name = "Status") +
+  scale_x_continuous(breaks = seq(-10, 30, 5)) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title    = "Distribusi Selisih Hari Pengembalian",
+    subtitle = "Nilai positif menunjukkan keterlambatan (melewati durasi sewa)",
+    x        = "Selisih Hari (Aktual − Durasi Sewa)",
+    y        = "Frekuensi"
+  ) +
+  theme_report()
+```
+
+<div class="insight">
+<strong>Interpretasi:</strong> Grafik di atas menunjukkan distribusi selisih hari antara durasi aktual pengembalian dan batas durasi sewa. Nilai di sebelah kiri garis putus-putus (≤ 0) menunjukkan film dikembalikan tepat waktu atau lebih cepat, sedangkan nilai di sebelah kanan (> 0) menunjukkan keterlambatan pengembalian. Terlihat bahwa transaksi tersebar di kedua sisi garis batas waktu, yang menandakan bahwa terdapat pelanggan yang mengembalikan film tepat waktu maupun terlambat. Jumlah transaksi terlambat juga terlihat cukup besar, sehingga keterlambatan pengembalian dapat menjadi salah satu faktor yang memengaruhi ketersediaan inventori film dalam sistem rental.
+</div>
+
+## Tingkat Keterlambatan per Genre
+
+Berikutnya dilakukan analisis berdasarkan genre film untuk mengetahui apakah terdapat kategori film tertentu yang cenderung lebih sering mengalami keterlambatan pengembalian.
+
+```{r viz-genre, fig.cap="Gambar 3. Tingkat Keterlambatan per Genre Film"}
+genre_df <- df %>%
+  group_by(genre) %>%
+  summarise(
+    total     = n(),
+    terlambat = sum(is_late),
+    pct_late  = terlambat / total * 100,
+    .groups   = "drop"
+  ) %>%
+  arrange(desc(pct_late))
+
+ggplot(genre_df, aes(x = reorder(genre, pct_late), y = pct_late, fill = pct_late)) +
+  geom_col(width = 0.65, show.legend = FALSE) +
+  geom_text(aes(label = paste0(round(pct_late, 1), "%")),
+            hjust = -0.1, size = 3.5, fontface = "bold", color = "#1e3a5f") +
+  scale_fill_gradient(low = "#aed6f1", high = "#1e3a5f") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  coord_flip() +
+  labs(
+    title    = "Persentase Keterlambatan per Genre Film",
+    subtitle = "Genre diurutkan dari persentase keterlambatan tertinggi",
+    x        = NULL,
+    y        = "% Terlambat"
+  ) +
+  theme_report()
+```
+
+```{r tabel-genre}
+genre_df %>%
+  rename(Genre = genre, `Total Rental` = total,
+         `Jml. Terlambat` = terlambat,
+         `% Terlambat` = pct_late) %>%
+  mutate(`% Terlambat` = round(`% Terlambat`, 2)) %>%
+  kable(caption = "Tabel 2. Keterlambatan per Genre") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+<div class="insight">
+<strong>Interpretasi:</strong> Dari hasil analisis tersebut, terdapat variasi tingkat keterlambatan antar genre film. Genre dengan persentase keterlambatan yang lebih tinggi menunjukkan bahwa film pada kategori tersebut cenderung lebih sering dikembalikan melewati batas waktu sewa. Informasi ini dapat digunakan perusahaan untuk menentukan strategi pengelolaan inventori, seperti pemberian pengingat pengembalian (reminder policy) atau penyesuaian durasi sewa pada genre tertentu guna mengurangi risiko keterlambatan.
+</div>
+
+## Analisis Perilaku Pelanggan
+
+Analisis juga dilakukan pada tingkat pelanggan untuk mengidentifikasi pelanggan dengan pola keterlambatan tertinggi. Hal ini digunakan untuk memahami apakah keterlambatan dipengaruhi oleh perilaku pelanggan tertentu.
+
+```{r viz-customer, fig.cap="Gambar 4. Persentase Keterlambatan Pelanggan"}
+
+cust_df <- df %>%
+  group_by(customer_id) %>%
+  summarise(
+    total_rental = n(),
+    total_late   = sum(is_late),
+    pct_late     = round(total_late / total_rental * 100, 1),
+    .groups      = "drop"
+  ) %>%
+  filter(total_rental >= 5) %>%
+  arrange(desc(pct_late), desc(total_late)) %>%
+  slice_head(n = 15)
+
+# urutan factor sesuai persentase
+cust_df$customer_label <- factor(
+  paste0("Customer ", cust_df$customer_id),
+  levels = rev(paste0("Customer ", cust_df$customer_id))
+)
+
+ggplot(
+  cust_df,
+  aes(
+    x = customer_label,
+    y = pct_late,
+    fill = total_rental
+  )
+) +
+
+  geom_col(width = 0.7) +
+
+  geom_text(
+    aes(label = paste0(pct_late, "%")),
+    hjust = -0.15,
+    size = 3.5,
+    fontface = "bold",
+    color = "#1e3a5f"
+  ) +
+
+  scale_fill_gradient(
+    low  = "#aed6f1",
+    high = "#383D99",
+    name = "Total Rental"
+  ) +
+
+  scale_y_continuous(
+    limits = c(0, 95),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+
+  coord_flip() +
+
+  labs(
+    title    = "Top 15 Pelanggan dengan Persentase Keterlambatan Tertinggi",
+    subtitle = "Warna menunjukkan total transaksi rental pelanggan",
+    x        = NULL,
+    y        = "Persentase Keterlambatan (%)"
+  ) +
+
+  theme_report()
+```
+
+<div class="insight">
+<strong>Interpretasi:</strong> Grafik di atas menunjukkan 15 pelanggan dengan tingkat keterlambatan pengembalian tertinggi berdasarkan persentase keterlambatan dari total transaksi rental yang dilakukan. Terlihat bahwa beberapa pelanggan memiliki persentase keterlambatan lebih dari 70%, yang menunjukkan bahwa keterlambatan terjadi secara berulang pada pelanggan tertentu. 
+
+Selain memiliki persentase keterlambatan yang tinggi, beberapa pelanggan juga memiliki jumlah keterlambatan yang relatif besar, sehingga berpotensi memengaruhi ketersediaan inventori film dalam sistem rental. Film yang terlambat dikembalikan tidak dapat segera disewakan kembali kepada pelanggan lain, sehingga dapat mengurangi peluang transaksi rental. 
+
+Hasil ini menunjukkan bahwa riwayat keterlambatan pelanggan dapat digunakan sebagai indikator risiko dalam pengelolaan inventori dan penyusunan strategi pengingat pengembalian film.
+</div>
+
+---
+
+# Logistic Regression
+
+## Dasar Teori
+
+Regresi logistik digunakan untuk memodelkan probabilitas suatu kejadian biner, yaitu kejadian yang hanya memiliki dua kemungkinan hasil. Dalam analisis ini, regresi logistik digunakan untuk memprediksi kemungkinan suatu transaksi rental mengalami keterlambatan pengembalian film (<code>late_return</code> = 1) atau tidak terlambat (<code>late_return</code> = 0) berdasarkan beberapa variabel seperti durasi rental, kategori film, dan jumlah pembayaran rental.
+
+<div class="formula">
+**Model Logistic Regression:**
+
+$$P(Y = 1 \mid \mathbf{x}) = \frac{1}{1 + e^{-z}}$$
+
+di mana:
+
+$$z = \beta_0 + \beta_1 x_1 + \beta_2 x_2 + \cdots + \beta_p x_p$$
+
+**Log-odds (Logit):**
+
+$$\log\left(\frac{P}{1 - P}\right) = \beta_0 + \sum_{j=1}^{p} \beta_j x_j$$
+</div>
+
+Variabel $Y = 1$ menyatakan bahwa pengembalian film mengalami **keterlambatan**, sedangkan $Y = 0$ menyatakan pengembalian **tepat waktu**. Koefisien $\beta_j$ menunjukkan perubahan log-odds keterlambatan untuk setiap satu satuan perubahan prediktor $x_j$.
+
+## Persiapan Data Pemodelan
+
+Sebelum proses pemodelan dilakukan, data dipersiapkan terlebih dahulu dengan memilih variabel yang relevan, melakukan transformasi tipe data, serta membentuk fitur historis pelanggan yang digunakan sebagai prediktor dalam model.
+
+```{r prep-model}
+library(caret)
+
+# Hitung fitur historis pelanggan
+cust_hist <- df %>%
+  group_by(customer_id) %>%
+  summarise(
+    cust_total_rental = n(),
+    cust_pct_late     = round(mean(is_late) * 100, 2),
+    .groups = "drop"
+  )
+
+df_model <- df %>%
+  left_join(cust_hist, by = "customer_id") %>%
+  mutate(
+    is_late   = factor(is_late, levels = c(0, 1),
+                       labels = c("TepatWaktu", "Terlambat")),
+    film_rating = factor(film_rating),
+    genre       = factor(genre)
+  ) %>%
+  select(is_late, rental_duration, rental_rate,
+         film_length, film_rating, genre,
+         payment_amount, cust_total_rental, cust_pct_late) %>%
+  na.omit()
+
+cat("Dimensi data pemodelan:", nrow(df_model), "x", ncol(df_model), "\n")
+cat("\nDistribusi variabel target:\n")
+print(table(df_model$is_late))
+```
+
+## Train-Test Split
+
+Data kemudian dibagi menjadi data latih (training data) dan data uji (testing data). Data latih digunakan untuk membangun model, sedangkan data uji digunakan untuk mengevaluasi performa model pada data yang belum pernah dilihat sebelumnya.
+
+```{r split}
+set.seed(42)
+idx        <- createDataPartition(df_model$is_late, p = 0.8, list = FALSE)
+train_data <- df_model[ idx, ]
+test_data  <- df_model[-idx, ]
+
+cat("Data latih :", nrow(train_data), "baris\n")
+cat("Data uji   :", nrow(test_data),  "baris\n")
+```
+
+## Pembangunan Model
+
+Model Logistic Regression dibangun menggunakan metode cross-validation untuk memperoleh performa model yang lebih stabil dan mengurangi risiko overfitting.
+
+```{r model}
+ctrl <- trainControl(
+  method          = "cv",
+  number          = 5,
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+set.seed(42)
+model_logit <- train(
+  is_late ~ .,
+  data      = train_data,
+  method    = "glm",
+  family    = "binomial",
+  trControl = ctrl,
+  metric    = "ROC"
+)
+
+summary(model_logit$finalModel)
+```
+
+<div class="insight">
+<strong>Interpretasi:</strong> Hasil regresi logistik menunjukkan bahwa beberapa variabel memiliki pengaruh signifikan terhadap kemungkinan keterlambatan pengembalian film. Variabel <code>rental_duration</code> memiliki koefisien negatif dan signifikan, yang menunjukkan bahwa semakin lama durasi rental yang diberikan, maka kemungkinan keterlambatan pengembalian cenderung menurun. Hal ini dapat terjadi karena pelanggan memiliki waktu pengembalian yang lebih longgar.
+
+Variabel <code>genreComedy</code> memiliki koefisien positif dan signifikan, yang menunjukkan bahwa film dengan genre komedi memiliki kecenderungan lebih tinggi untuk mengalami keterlambatan pengembalian dibanding kategori referensi.
+
+Selain itu, variabel <code>cust_pct_late</code> memiliki pengaruh positif yang sangat signifikan terhadap keterlambatan pengembalian. Artinya, pelanggan yang memiliki riwayat persentase keterlambatan tinggi cenderung kembali melakukan keterlambatan pada transaksi berikutnya. Hasil ini menunjukkan bahwa perilaku pelanggan menjadi salah satu faktor penting dalam memprediksi keterlambatan pengembalian film.
+</div>
+
+## Koefisien dan Odds Ratio
+
+Setelah model Logistic Regression berhasil dibangun, dilakukan analisis terhadap koefisien model dan nilai Odds Ratio untuk memahami pengaruh setiap variabel prediktor terhadap kemungkinan keterlambatan pengembalian film.
+
+```{r koefisien}
+library(pROC)
+
+coef_df <- as.data.frame(
+  cbind(
+    Estimate = coef(model_logit$finalModel),
+    `Odds Ratio` = exp(coef(model_logit$finalModel)),
+    confint(model_logit$finalModel)
+  )
+)
+
+coef_df %>%
+  round(4) %>%
+  kable(caption = "Tabel 3. Koefisien dan Odds Ratio Model Logistic Regression") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+<div class="insight">
+<strong>Interpretasi:</strong> Odds Ratio (OR) digunakan untuk menunjukkan seberapa besar pengaruh masing-masing variabel terhadap kemungkinan keterlambatan pengembalian film. Nilai OR > 1 menunjukkan bahwa variabel tersebut meningkatkan peluang keterlambatan, sedangkan OR < 1 menunjukkan bahwa variabel tersebut menurunkan peluang keterlambatan.
+
+Variabel <code>cust_pct_late</code> memiliki nilai OR sebesar 1.0394 dan merupakan salah satu variabel yang paling signifikan dalam model. Hal ini menunjukkan bahwa semakin tinggi persentase keterlambatan pelanggan pada transaksi sebelumnya, maka semakin besar kemungkinan pelanggan tersebut mengalami keterlambatan kembali pada transaksi berikutnya.
+
+Selain itu, variabel <code>rental_duration</code> memiliki OR sebesar 0.8088, yang menunjukkan bahwa durasi rental yang lebih panjang cenderung menurunkan kemungkinan keterlambatan pengembalian. Pada kategori film, genre Comedy memiliki OR sebesar 1.8521, yang mengindikasikan bahwa film genre komedi memiliki peluang keterlambatan lebih tinggi dibanding kategori referensi.
+</div>
+
+---
+
+# Prediction and Classification
+
+## Prediksi pada Data Uji
+
+Setelah model Logistic Regression terbentuk, dilakukan proses prediksi pada data uji untuk mengetahui apakah suatu transaksi diprediksi terlambat atau tepat waktu. Selain kelas prediksi, model juga menghasilkan probabilitas keterlambatan untuk setiap transaksi.
+
+```{r prediksi}
+pred_class <- predict(model_logit, test_data)
+pred_prob  <- predict(model_logit, test_data, type = "prob")[, "Terlambat"]
+hasil_prediksi <- data.frame(
+  Actual    = test_data$is_late,
+  Prediksi  = pred_class,
+  Probabilitas = pred_prob
+)
+
+hasil_prediksi
+```
+
+<div class="insight">
+<strong>Interpretasi:</strong> Nilai probabilitas yang lebih tinggi menunjukkan bahwa transaksi memiliki kemungkinan lebih besar untuk mengalami keterlambatan pengembalian film.
+</div>
+
+## Confusion Matrix
+
+Untuk mengevaluasi hasil klasifikasi model, digunakan confusion matrix yang membandingkan hasil prediksi model dengan kondisi aktual pada data uji.
+
+```{r confusion-matrix}
+cm <- confusionMatrix(pred_class, test_data$is_late, positive = "Terlambat")
+print(cm)
+```
+
+```{r viz-cm, fig.cap="Gambar 5. Visualisasi Confusion Matrix"}
+cm_df <- as.data.frame(cm$table)
+colnames(cm_df) <- c("Prediksi", "Aktual", "Freq")
+
+ggplot(cm_df, aes(x = Prediksi, y = Aktual, fill = Freq)) +
+  geom_tile(color = "white", linewidth = 1.2) +
+  geom_text(aes(label = Freq), fontface = "bold", size = 7, color = "white") +
+  scale_fill_gradient(low = "#aed6f1", high = "#1e3a5f", name = "Jumlah") +
+  labs(
+    title    = "Confusion Matrix — Logistic Regression",
+    subtitle = "Perbandingan prediksi model dengan nilai aktual pada data uji"
+  ) +
+  theme_report() +
+  theme(panel.grid = element_blank(),
+        axis.text  = element_text(size = 12))
+```
+
+<div class="insight">
+<strong>Interpretasi:</strong> Confusion matrix menunjukkan bahwa model Logistic Regression memiliki performa prediksi yang sangat baik dalam mengklasifikasikan keterlambatan pengembalian film. Dari data uji, model berhasil memprediksi 1.452 transaksi terlambat dengan benar dan 1.547 transaksi tepat waktu dengan benar. Selain itu, hanya terdapat 172 transaksi terlambat yang diprediksi sebagai tepat waktu, serta tidak terdapat transaksi tepat waktu yang salah diprediksi sebagai terlambat.
+</div>
+
+## Metrik Evaluasi Model
+
+Untuk mengukur performa model secara lebih menyeluruh, digunakan beberapa metrik evaluasi seperti accuracy, sensitivity, specificity, precision, F1-score, dan AUC-ROC.
+
+```{r metrik}
+roc_obj <- roc(as.integer(test_data$is_late == "Terlambat"),
+               pred_prob, quiet = TRUE)
+
+metrik <- data.frame(
+  Metrik = c("Accuracy", "Sensitivity (Recall)",
+             "Specificity", "Precision (PPV)", "F1-Score", "AUC-ROC"),
+  Nilai  = round(c(
+    cm$overall["Accuracy"],
+    cm$byClass["Sensitivity"],
+    cm$byClass["Specificity"],
+    cm$byClass["Pos Pred Value"],
+    cm$byClass["F1"],
+    auc(roc_obj)
+  ), 4)
+)
+
+metrik %>%
+  kable(caption = "Tabel 4. Metrik Evaluasi Model Logistic Regression") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  column_spec(2, bold = TRUE, color = "#1e3a5f")
+```
+
+<div class="insight">
+<strong>Interpretasi:</strong> Nilai akurasi model sebesar 94,58% menunjukkan bahwa model mampu melakukan prediksi dengan tingkat ketepatan yang tinggi. Nilai <em>sensitivity</em> sebesar 89,41% menunjukkan bahwa sebagian besar transaksi yang benar-benar terlambat berhasil terdeteksi oleh model, sedangkan <em>specificity</em> sebesar 100% menunjukkan bahwa seluruh transaksi tepat waktu berhasil dikenali dengan benar. Hasil ini menunjukkan bahwa model <em>Logistic Regression</em> cukup efektif digunakan untuk memprediksi kemungkinan keterlambatan pengembalian film pada sistem rental.
+</div>
+
+## Kurva <em>Receiver Operating Characteristic</em>
+
+Kurva ROC digunakan untuk mengevaluasi kemampuan model dalam membedakan transaksi yang terlambat dan tepat waktu berdasarkan berbagai nilai threshold probabilitas.
+
+```{r viz-roc, fig.cap="Gambar 6. Kurva ROC Model Logistic Regression"}
+roc_df <- data.frame(
+  FPR = 1 - roc_obj$specificities,
+  TPR = roc_obj$sensitivities
+)
+
+ggplot(roc_df, aes(x = FPR, y = TPR)) +
+  geom_line(color = "#1e3a5f", linewidth = 1.2) +
+  geom_abline(linetype = "dashed", color = "#6c757d") +
+  annotate("text", x = 0.65, y = 0.35,
+           label = paste0("AUC = ", round(auc(roc_obj), 3)),
+           size = 5, fontface = "bold", color = "#1e3a5f") +
+  scale_x_continuous(labels = percent_format()) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title    = "Kurva ROC — Logistic Regression",
+    subtitle = "Semakin jauh kurva dari garis diagonal, semakin baik model",
+    x        = "False Positive Rate (1 - Specificity)",
+    y        = "True Positive Rate (Sensitivity)"
+  ) +
+  theme_report()
+```
+
+<div class="insight">
+<strong>Interpretasi:</strong> Nilai <strong>AUC = `r round(auc(roc_obj), 3)`</strong> menunjukkan bahwa model memiliki kemampuan diskriminasi yang <strong>`r ifelse(auc(roc_obj) >= 0.7, "cukup baik", "perlu ditingkatkan")`</strong> dalam membedakan transaksi yang terlambat dan tepat waktu. Nilai AUC di atas 0.7 umumnya dianggap layak untuk keperluan bisnis. Model dapat dikembangkan lebih lanjut dengan menambahkan variabel atau fitur lain yang lebih informatif terkait perilaku pelanggan maupun karakteristik transaksi rental.
+</div>
+
+---
+
+# Business Insight
+
+Berdasarkan hasil analisis, berikut adalah rekomendasi yang dapat diterapkan oleh manajemen bisnis rental DVD untuk mengurangi keterlambatan pengembalian film:
+
+| No. | Temuan | Rekomendasi |
+|-----|--------|-------------|
+| 1 | `r round(mean(df$is_late)*100,1)`% transaksi terlambat | Terapkan sistem notifikasi pengingat H-2 dan H-1 sebelum jatuh tempo pengembalian |
+| 2 | Terdapat variasi tingkat keterlambatan antar genre film | Pertimbangkan penyesuaian durasi sewa pada genre tertentu |
+| 3 | Pelanggan dengan pola terlambat berulang | Terapkan kebijakan pengingat khusus atau evaluasi sistem denda |
+| 4 | Riwayat keterlambatan pelanggan menjadi prediktor paling signifikan | Gunakan informasi historis pelanggan dalam pengelolaan risiko keterlambatan |
+
+<div class="info-box"> 
+<strong>Dampak Bisnis:</strong> Tingginya keterlambatan pengembalian dapat memengaruhi ketersediaan inventori film bagi pelanggan lain. Dengan total <strong>`r format(nrow(df), big.mark=",")`</strong> transaksi rental, pengurangan tingkat keterlambatan berpotensi membantu meningkatkan efisiensi operasional dan menjaga peluang penyewaan film tetap optimal. 
+</div>
+
+---
+
+# Conclusion
+
+Berdasarkan hasil analisis <em>Late Return Behavior</em> pada database Sakila, diketahui bahwa keterlambatan pengembalian film merupakan masalah yang cukup sering terjadi dalam transaksi rental. Analisis menunjukkan bahwa terdapat perbedaan tingkat keterlambatan antar genre film serta adanya pelanggan dengan pola keterlambatan yang berulang.
+
+Model <em>Logistic Regression</em> yang dibangun menunjukkan performa prediksi yang sangat baik dengan nilai AUC sebesar `r round(auc(roc_obj), 3)`. Variabel riwayat keterlambatan pelanggan <code>(cust_pct_late)</code> menjadi salah satu faktor paling signifikan dalam memprediksi keterlambatan pengembalian film.
+
+Hasil analisis ini menunjukkan bahwa perusahaan dapat memanfaatkan data historis pelanggan dan karakteristik transaksi rental untuk membantu pengelolaan inventori serta mengurangi risiko keterlambatan pengembalian melalui strategi seperti sistem pengingat otomatis dan pengelolaan pelanggan berbasis risiko.
+
+---
+
+<p style="text-align:center; color:#6c757d; font-size:13px; margin-top:40px;">
+*Laporan ini dibuat menggunakan R Markdown dengan data dari MySQL Sakila Database.*<br>
+</p>
